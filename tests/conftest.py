@@ -4,6 +4,7 @@ Tests use ``pytest-homeassistant-custom-component`` which simulates the
 parts of Home Assistant needed for integration testing — no real HA
 process is started.
 """
+
 from __future__ import annotations
 
 from collections.abc import Generator
@@ -78,7 +79,7 @@ def fake_inactive_sp() -> ServicePoint:
 @pytest.fixture
 def fake_meter_total_channel() -> MeasurementChannel:
     return MeasurementChannel(
-        id="mc-total-24h",
+        id="mc_total_24h",
         type="S-KWH-24H",
         uom="KWH",
         tou="24H",
@@ -92,7 +93,7 @@ def fake_meter_total_channel() -> MeasurementChannel:
 @pytest.fixture
 def fake_meter_30min_channel() -> MeasurementChannel:
     return MeasurementChannel(
-        id="mc-30min-imp",
+        id="mc_30min_imp",
         type="KWH-30MIN-LP-IMP",
         uom="KWH",
         tou="30MIN",
@@ -104,7 +105,9 @@ def fake_meter_30min_channel() -> MeasurementChannel:
 
 
 @pytest.fixture
-def fake_active_meter(fake_meter_total_channel, fake_meter_30min_channel) -> MeterConfig:
+def fake_active_meter(
+    fake_meter_total_channel, fake_meter_30min_channel
+) -> MeterConfig:
     return MeterConfig(
         serial_number="NEW123",
         manufacturer="LANDIS & GYR",
@@ -135,21 +138,19 @@ def mock_client(
 
     # readings/list returns one ChannelReadings per call (per mc_id)
     def get_readings_side_effect(sp_id, start, end, mc_id=None):
-        if mc_id == "mc-total-24h":
+        if mc_id == "mc_total_24h":
             return [
                 ChannelReadings(
-                    channel_id="mc-total-24h",
+                    channel_id="mc_total_24h",
                     readings=(
-                        Reading(
-                            dt=datetime(2026, 5, 8), value=24.0, reading=2974.0
-                        ),
+                        Reading(dt=datetime(2026, 5, 8), value=24.0, reading=2974.0),
                     ),
                 )
             ]
-        if mc_id == "mc-30min-imp":
+        if mc_id == "mc_30min_imp":
             return [
                 ChannelReadings(
-                    channel_id="mc-30min-imp",
+                    channel_id="mc_30min_imp",
                     readings=(
                         Reading(
                             dt=datetime(2026, 5, 8, 14, 0), value=0.315, reading=None
@@ -178,8 +179,8 @@ def patch_eac_client(mock_client) -> Generator[AsyncMock, None, None]:
     teardown check refuses to tolerate). Our mocked client never uses
     the session anyway.
     """
-    import custom_components.eac_cyprus  # noqa: F401
-    import custom_components.eac_cyprus.config_flow  # noqa: F401
+    import custom_components.eac_cyprus
+    import custom_components.eac_cyprus.config_flow
     import custom_components.eac_cyprus.coordinator  # noqa: F401
 
     fake_session = AsyncMock()
@@ -188,7 +189,10 @@ def patch_eac_client(mock_client) -> Generator[AsyncMock, None, None]:
         ("custom_components.eac_cyprus.config_flow.EacClient", mock_client),
         ("custom_components.eac_cyprus.coordinator.EacClient", mock_client),
         ("custom_components.eac_cyprus.async_get_clientsession", fake_session),
-        ("custom_components.eac_cyprus.config_flow.async_get_clientsession", fake_session),
+        (
+            "custom_components.eac_cyprus.config_flow.async_get_clientsession",
+            fake_session,
+        ),
     ]
     patches = [patch(t, return_value=v) for t, v in targets]
     for p in patches:

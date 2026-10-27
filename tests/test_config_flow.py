@@ -1,4 +1,5 @@
 """Tests for the EAC Cyprus config flow."""
+
 from __future__ import annotations
 
 import aiohttp
@@ -16,7 +17,6 @@ from custom_components.eac_cyprus.const import (
     DEFAULT_BASE_URL,
     DOMAIN,
 )
-
 
 USER_INPUT = {
     CONF_EMAIL: "Test@Example.COM",

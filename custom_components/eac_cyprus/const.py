@@ -1,4 +1,5 @@
 """Constants for the EAC Cyprus integration."""
+
 from __future__ import annotations
 
 DOMAIN = "eac_cyprus"

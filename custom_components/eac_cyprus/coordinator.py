@@ -3,18 +3,16 @@
 Data model is meter-centric: a service point can carry several meters over its
 lifetime (the DSO swaps hardware), and we surface each as its own HA device so
 a retired meter keeps its history and final reading instead of vanishing. Every
-refresh fetches fresh readings for the *active* meter; retired meters never
-change, so their final snapshot is fetched once and cached.
+refresh fetches a rolling correction window. Complete histories, including
+retired meters, are reconciled weekly and on explicit full-history imports.
 """
+
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from eac_dso_portal import (
     EacApiError,
@@ -25,16 +23,28 @@ from eac_dso_portal import (
     Reading,
     ServicePoint,
     UserDetails,
+    as_utc,
 )
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
 from .const import (
     CONF_HISTORY_DAYS,
     CONF_SCAN_INTERVAL_MINUTES,
     DEFAULT_HISTORY_DAYS,
     DEFAULT_SCAN_INTERVAL_MINUTES,
     DOMAIN,
-    channel_label,
 )
-from .statistics import import_cumulative_history
+from .energy import async_migrate_energy
+from .history import (
+    async_import_full_history,
+    history_window,
+    import_channel,
+    is_energy,
+    statistic_id,
+)
+from .statistics import EacStatistics
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,7 +53,7 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     """Normalise a (possibly naive) portal datetime to tz-aware UTC."""
     if dt is None:
         return None
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return as_utc(dt)
 
 
 def meter_key(sp_id: str, meter: MeterConfig) -> str:
@@ -57,6 +67,7 @@ def meter_key(sp_id: str, meter: MeterConfig) -> str:
 @dataclass(frozen=True, slots=True)
 class ChannelState:
     """Current state of a single measurement channel."""
+
     channel: MeasurementChannel
     latest: Reading | None  # most recent reading we have (cumulative or interval)
 
@@ -64,6 +75,7 @@ class ChannelState:
 @dataclass(frozen=True, slots=True)
 class MeterState:
     """One meter on a service point, active or retired, with its channels."""
+
     service_point: ServicePoint
     meter: MeterConfig
     active: bool  # removal_date is None
@@ -83,6 +95,7 @@ class MeterState:
 @dataclass(frozen=True, slots=True)
 class ServicePointState:
     """Per-service-point snapshot built every refresh."""
+
     service_point: ServicePoint
     meters: dict[str, MeterState]  # keyed by meter_key()
 
@@ -90,6 +103,7 @@ class ServicePointState:
 @dataclass(frozen=True, slots=True)
 class EacData:
     """What the coordinator hands to entities."""
+
     user: UserDetails
     points: dict[str, ServicePointState]  # keyed by service-point id
     last_success_time: datetime  # tz-aware UTC; surfaced via a diagnostic sensor
@@ -98,7 +112,9 @@ class EacData:
 class EacCoordinator(DataUpdateCoordinator[EacData]):
     """Fetch service points, meters, and per-channel readings on a schedule."""
 
-    def __init__(self, hass: HomeAssistant, client: EacClient, entry: ConfigEntry) -> None:
+    def __init__(
+        self, hass: HomeAssistant, client: EacClient, entry: ConfigEntry
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -107,8 +123,8 @@ class EacCoordinator(DataUpdateCoordinator[EacData]):
         )
         self._client = client
         self._entry = entry
-        # Retired meters never change; cache their final snapshot by meter_key.
-        self._retired_cache: dict[str, MeterState] = {}
+        self.statistics = EacStatistics(hass, entry.entry_id)
+        self.history_lock = asyncio.Lock()
 
     @property
     def client(self) -> EacClient:
@@ -119,7 +135,18 @@ class EacCoordinator(DataUpdateCoordinator[EacData]):
         """Re-read options after the options flow. Only cadence needs pushing."""
         self.update_interval = _interval_from_options(self._entry)
 
+    async def async_import_full_history(self):
+        async with self.history_lock:
+            return await async_import_full_history(
+                self.hass, self.client, self.statistics
+            )
+
     async def _async_update_data(self) -> EacData:
+        async with self.history_lock:
+            await self.statistics.async_load()
+            return await self._async_fetch_data()
+
+    async def _async_fetch_data(self) -> EacData:
         try:
             user = await self._client.get_user_details()
             sps = await self._client.list_service_points()
@@ -149,25 +176,20 @@ class EacCoordinator(DataUpdateCoordinator[EacData]):
                     else:
                         ms = await self._retired_meter(sp, cfg, received_at)
                     meters[ms.key] = ms
+                    await async_migrate_energy(self.hass, sp.id, cfg, self.statistics)
 
             points[sp.id] = ServicePointState(service_point=sp, meters=meters)
 
-        return EacData(
-            user=user, points=points, last_success_time=datetime.now(UTC)
-        )
+        return EacData(user=user, points=points, last_success_time=datetime.now(UTC))
 
     async def _retired_meter(
         self, sp: ServicePoint, cfg: MeterConfig, received_at: datetime
     ) -> MeterState:
-        """Final snapshot of a retired meter, fetched once and cached."""
-        key = meter_key(sp.id, cfg)
-        if key not in self._retired_cache:
-            end = _as_utc(cfg.removal_date) or received_at
-            start = end - timedelta(days=14)
-            self._retired_cache[key] = await self._fetch_meter(
-                sp, cfg, start, end, received_at
-            )
-        return self._retired_cache[key]
+        """Refresh a retired meter too, allowing later portal corrections."""
+        end = _as_utc(cfg.removal_date) or received_at
+        return await self._fetch_meter(
+            sp, cfg, end - timedelta(days=14), end, received_at
+        )
 
     async def _fetch_meter(
         self,
@@ -181,16 +203,28 @@ class EacCoordinator(DataUpdateCoordinator[EacData]):
         channels: dict[str, ChannelState] = {}
         measured_at: datetime | None = None
         for ch in cfg.channels:
+            full = False
+            channel_start, channel_end = start, end
+            if is_energy(ch):
+                channel_start, channel_end, full = history_window(
+                    self.statistics,
+                    statistic_id(sp.id, cfg, ch),
+                    cfg,
+                    received_at,
+                    int(
+                        self._entry.options.get(CONF_HISTORY_DAYS, DEFAULT_HISTORY_DAYS)
+                    ),
+                )
             try:
                 per_channel = await self._client.get_readings(
-                    sp.id, start, end, mc_id=ch.id
+                    sp.id, channel_start, channel_end, mc_id=ch.id
                 )
             except EacApiError as err:
-                _LOGGER.debug("No readings for sp=%s mc=%s: %s", sp.id, ch.id, err)
+                _LOGGER.warning(
+                    "Readings failed for sp=%s mc=%s: %s", sp.id, ch.id, err
+                )
                 continue
-            matching = next(
-                (cr for cr in per_channel if cr.channel_id == ch.id), None
-            )
+            matching = next((cr for cr in per_channel if cr.channel_id == ch.id), None)
             if matching is None or not matching.readings:
                 continue
             latest = max(matching.readings, key=lambda r: r.dt)
@@ -199,20 +233,15 @@ class EacCoordinator(DataUpdateCoordinator[EacData]):
             if dt is not None and (measured_at is None or dt > measured_at):
                 measured_at = dt
 
-            # Backfill external statistics (the "what actually happened" half)
-            # for cumulative kWh channels, named from the meter serial.
-            if ch.uom.upper() == "KWH" and not ch.interval:
-                serial = cfg.serial_number or (
-                    cfg.install_date.date().isoformat()
-                    if cfg.install_date
-                    else "unknown"
-                )
-                import_cumulative_history(
-                    self.hass,
+            if is_energy(ch):
+                await import_channel(
+                    self.statistics,
                     sp.id,
-                    ch.id,
-                    f"{serial} {channel_label(ch.type)}",
+                    cfg,
+                    ch,
                     matching.readings,
+                    full=full,
+                    end=channel_end,
                 )
 
         return MeterState(

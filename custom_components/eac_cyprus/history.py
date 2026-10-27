@@ -1,105 +1,145 @@
-"""One-time deep backfill of the full available meter history.
+"""Shared full/rolling history ingestion for polling and the import service."""
 
-The regular coordinator only imports a rolling window (``history_days``). This
-pulls the *entire* available series for every cumulative kWh channel of every
-meter -- active and retired -- from the portal and writes it as external
-statistics, so the Energy Dashboard graph reaches back to each meter's install
-date instead of only a couple of weeks. Retired meters (already swapped out)
-get their full history too, so their device is not an empty stub.
-
-Exposed as the ``eac_cyprus.import_full_history`` service and offered once via
-a persistent notification on first setup. Idempotent -- safe to re-run.
-"""
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from eac_dso_portal import EacClient, MeasurementChannel, MeterConfig, as_utc
 from homeassistant.core import HomeAssistant
 
-from eac_dso_portal import EacApiError, EacClient
-
 from .const import channel_label
-from .statistics import import_cumulative_history
+from .statistics import (
+    INTERVAL_TYPES,
+    EacStatistics,
+    interval_statistic_id,
+)
 
-_LOGGER = logging.getLogger(__name__)
-
-# Lower bound if a meter somehow reports no install date.
 _MAX_LOOKBACK = timedelta(days=3650)
+RECONCILE_INTERVAL = timedelta(days=7)
 
 
-def _as_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+def meter_identity(cfg: MeterConfig) -> str:
+    return f"{cfg.serial_number or 'unknown'}_{cfg.install_date.isoformat() if cfg.install_date else 'unknown'}"
 
 
-def _meter_serial(cfg) -> str:
-    return cfg.serial_number or (
-        cfg.install_date.date().isoformat() if cfg.install_date else "unknown"
+def statistic_id(
+    sp_id: str, cfg: MeterConfig, channel: MeasurementChannel, position: str = "end"
+) -> str:
+    if channel.type in INTERVAL_TYPES:
+        return interval_statistic_id(
+            sp_id, f"{meter_identity(cfg)}_{position}", channel.id
+        )
+    return (
+        interval_statistic_id(sp_id, meter_identity(cfg), channel.id).removesuffix(
+            "_energy"
+        )
+        + "_register"
     )
 
 
+def is_energy(channel: MeasurementChannel) -> bool:
+    return channel.uom.upper() == "KWH" and (
+        not channel.interval or channel.type in INTERVAL_TYPES
+    )
+
+
+def history_window(
+    store: EacStatistics,
+    sid: str,
+    cfg: MeterConfig,
+    now: datetime,
+    days: int,
+    force: bool = False,
+) -> tuple[datetime, datetime, bool]:
+    data = store.series.get(sid, {})
+    checked = data.get("full_checked")
+    full = (
+        force
+        or not checked
+        or now - datetime.fromisoformat(checked) >= RECONCILE_INTERVAL
+    )
+    installed = as_utc(cfg.install_date) if cfg.install_date else now - _MAX_LOOKBACK
+    end = as_utc(cfg.removal_date) if cfg.removal_date else now
+    if full:
+        return installed, end, True
+    start = end - timedelta(days=days)
+    # Catch up after an outage longer than the rolling correction window.
+    if through := data.get("fetched_through"):
+        start = min(start, datetime.fromisoformat(through) - timedelta(days=1))
+    # Whole local days are fetched in the library; overlap an additional day so
+    # the initial cumulative baseline and midnight-ending interval are retained.
+    return max(installed, start), end, False
+
+
+async def import_channel(
+    store: EacStatistics,
+    sp_id: str,
+    cfg: MeterConfig,
+    ch: MeasurementChannel,
+    readings,
+    *,
+    full: bool,
+    end: datetime,
+    position: str = "end",
+) -> str:
+    sid = statistic_id(sp_id, cfg, ch, position)
+    serial = cfg.serial_number or "unknown"
+    interval = ch.type in INTERVAL_TYPES
+    label = (
+        (
+            "Energy imported (30-min)"
+            if ch.type.endswith("IMP")
+            else "Energy exported (30-min)"
+        )
+        if interval
+        else channel_label(ch.type)
+    )
+    await store.async_merge(
+        sid,
+        f"{serial} {label}",
+        readings,
+        interval=interval,
+        position=position,
+        full=full,
+        fetched_through=end,
+    )
+    return sid
+
+
 async def async_import_full_history(
-    hass: HomeAssistant, client: EacClient
+    hass: HomeAssistant, client: EacClient, store: EacStatistics
 ) -> list[dict[str, Any]]:
-    """Backfill full history for all meters. Returns a per-channel summary."""
+    """Import every meter and both interval directions; propagate failures.
+
+    A failed channel must not be presented as a successful complete import.
+    Already saved channels can be replayed safely on the next attempt.
+    """
+    await store.async_load()
     now = datetime.now(UTC)
-    results: list[dict[str, Any]] = []
-
+    results = []
     for sp in await client.list_service_points():
-        if not (sp.active and sp.device_exists):
-            continue
-        try:
-            configs = await client.get_meter_configs(sp.id)
-        except EacApiError as err:
-            _LOGGER.warning("Full import: meter config failed for %s: %s", sp.id, err)
-            continue
-
-        for cfg in configs:
-            serial = _meter_serial(cfg)
-            start = _as_utc(cfg.install_date) or (now - _MAX_LOOKBACK)
-            end = _as_utc(cfg.removal_date) or now
+        for cfg in await client.get_meter_configs(sp.id):
             for ch in cfg.channels:
-                if ch.uom.upper() != "KWH" or ch.interval:
+                if not is_energy(ch):
                     continue
-                try:
-                    crs = await client.get_readings(sp.id, start, end, mc_id=ch.id)
-                except EacApiError as err:
-                    _LOGGER.debug(
-                        "Full import: no data sp=%s mc=%s: %s", sp.id, ch.id, err
-                    )
-                    continue
-                matching = next(
-                    (cr for cr in crs if cr.channel_id == ch.id), None
-                )
+                sid = statistic_id(sp.id, cfg, ch)
+                start, end, _ = history_window(store, sid, cfg, now, 14, force=True)
+                crs = await client.get_readings(sp.id, start, end, mc_id=ch.id)
+                matching = next((cr for cr in crs if cr.channel_id == ch.id), None)
                 if matching is None or not matching.readings:
                     continue
-                import_cumulative_history(
-                    hass,
-                    sp.id,
-                    ch.id,
-                    f"{serial} {channel_label(ch.type)}",
-                    matching.readings,
+                await import_channel(
+                    store, sp.id, cfg, ch, matching.readings, full=True, end=end
                 )
                 results.append(
                     {
-                        "meter": serial,
+                        "meter": cfg.serial_number,
                         "channel": ch.type,
+                        "statistic_id": sid,
                         "readings": len(matching.readings),
-                        "from": start.date().isoformat(),
-                        "to": end.date().isoformat(),
+                        "from": start.isoformat(),
+                        "to": end.isoformat(),
                     }
                 )
-                _LOGGER.info(
-                    "Full import: meter %s channel %s (%d readings, %s..%s)",
-                    serial,
-                    ch.type,
-                    len(matching.readings),
-                    start.date(),
-                    end.date(),
-                )
-
-    _LOGGER.info("Full history import complete: %d channel(s)", len(results))
     return results

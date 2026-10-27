@@ -1,9 +1,9 @@
 """Tests for the EAC Cyprus options flow."""
+
 from __future__ import annotations
 
 from datetime import timedelta
 
-from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -101,10 +101,12 @@ async def test_coordinator_reads_history_days_from_options(
     coord = EacCoordinator(hass, mock_client, entry)
     await coord._async_update_data()
 
-    # get_readings is called once per channel; first call has start = end - 3 days.
+    # The initial poll establishes complete history; subsequent polls use options.
+    mock_client.get_readings.reset_mock()
+    await coord._async_update_data()
     args = mock_client.get_readings.await_args_list
     assert args, "expected at least one get_readings call"
-    sp_id, start, end, *_ = args[0].args + tuple(args[0].kwargs.values())[:0]
+    _sp_id, start, end, *_ = args[0].args + tuple(args[0].kwargs.values())[:0]
     assert (end - start) == timedelta(days=3)
 
 
@@ -117,6 +119,8 @@ async def test_coordinator_falls_back_to_defaults_without_options(
     coord = EacCoordinator(hass, mock_client, entry)
     assert coord.update_interval == timedelta(minutes=DEFAULT_SCAN_INTERVAL_MINUTES)
     await coord._async_update_data()
+    mock_client.get_readings.reset_mock()
+    await coord._async_update_data()
     args = mock_client.get_readings.await_args_list[0]
-    sp_id, start, end = args.args[:3]
+    _sp_id, start, end = args.args[:3]
     assert (end - start) == timedelta(days=DEFAULT_HISTORY_DAYS)

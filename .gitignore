@@ -34,3 +34,6 @@ htmlcov/
 .vscode/
 .DS_Store
 *.swp
+
+# Companion fork checkout (separate repository)
+portal-client/

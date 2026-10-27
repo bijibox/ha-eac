@@ -1,4 +1,5 @@
 """Config flow for the EAC Cyprus integration."""
+
 from __future__ import annotations
 
 import logging
@@ -6,7 +7,7 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-
+from eac_dso_portal import EacApiError, EacAuthError, EacClient
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -17,7 +18,6 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from eac_dso_portal import EacApiError, EacAuthError, EacClient
 from .const import (
     CONF_BASE_URL,
     CONF_EMAIL,
@@ -84,7 +84,7 @@ class EacConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except (EacApiError, aiohttp.ClientError, TimeoutError):
                 errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001 - last-resort safety net
+            except Exception:
                 _LOGGER.exception("Unexpected error during EAC login")
                 errors["base"] = "unknown"
             else:

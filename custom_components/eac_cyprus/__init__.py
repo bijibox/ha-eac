@@ -1,8 +1,10 @@
 """EAC Cyprus integration for Home Assistant."""
+
 from __future__ import annotations
 
 import logging
 
+from eac_dso_portal import EacClient
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -15,18 +17,15 @@ from homeassistant.core import (
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from eac_dso_portal import EacClient
-
 from .const import CONF_BASE_URL, CONF_EMAIL, CONF_PASSWORD, DEFAULT_BASE_URL, DOMAIN
 from .coordinator import EacCoordinator
-from .history import async_import_full_history
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 SERVICE_IMPORT_HISTORY = "import_full_history"
-_OFFERED_FLAG = "history_import_offered"
+_OFFERED_FLAG = "precise_history_import_offered"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -60,7 +59,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def _handle_import(call: ServiceCall) -> ServiceResponse:
         details: list[dict] = []
         for coordinator in list(hass.data.get(DOMAIN, {}).values()):
-            details.extend(await async_import_full_history(hass, coordinator.client))
+            details.extend(await coordinator.async_import_full_history())
             # Surface retired meters and their final readings on the next cycle.
             await coordinator.async_request_refresh()
         readings = sum(d["readings"] for d in details)
@@ -94,10 +93,10 @@ def _async_offer_history_import(hass: HomeAssistant, entry: ConfigEntry) -> None
         return
     persistent_notification.async_create(
         hass,
-        "To load your complete meter history into the Energy Dashboard, run the "
-        "**EAC: Import full history** action once (Developer Tools -> Actions -> "
-        "`eac_cyprus.import_full_history`). Regular polling only keeps a rolling "
-        "window; this backfills everything the portal has, for every meter.",
+        "Precise meter history is loaded automatically on the first successful poll. "
+        "To refresh all available history immediately, run **EAC: Import full history** "
+        "(Developer Tools -> Actions -> `eac_cyprus.import_full_history`). "
+        "Regular polling checks recent corrections and reconciles the full history weekly.",
         title="EAC Cyprus: import full history",
         notification_id=f"{DOMAIN}_{entry.entry_id}_history",
     )

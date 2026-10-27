@@ -3,6 +3,7 @@
 The portal publishes with a 2-3 day lag, so "no fresh reading" is only a real
 problem once it exceeds a configurable threshold (``stale_threshold_days``).
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta

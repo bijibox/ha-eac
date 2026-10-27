@@ -1,114 +1,196 @@
-"""Tests for the long-term-statistics backfill module."""
-from __future__ import annotations
+"""Acceptance checks for precise, replayable external energy statistics."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
+import pytest
 from eac_dso_portal import Reading
-from homeassistant.const import UnitOfEnergy
-from homeassistant.core import HomeAssistant
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.components.recorder.models import StatisticMeanType
 
-from custom_components.eac_cyprus.const import CONF_EMAIL, CONF_PASSWORD, DOMAIN
 from custom_components.eac_cyprus.statistics import (
-    external_statistic_id,
-    import_cumulative_history,
+    EacStatistics,
+    build_statistics,
+    interval_statistic_id,
 )
 
 
-def _entry(hass: HomeAssistant) -> MockConfigEntry:
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        unique_id="test@example.com",
-        data={CONF_EMAIL: "test@example.com", CONF_PASSWORD: "x"},
-        title="Test User",
-    )
-    entry.add_to_hass(hass)
-    return entry
-
-
-def _readings(*pairs: tuple[str, float | None, float]) -> tuple[Reading, ...]:
-    """Build Readings from (iso_dt, reading|None, value) triples."""
+def readings(*pairs):
     return tuple(
-        Reading(dt=datetime.fromisoformat(dt), reading=r, value=v) for dt, r, v in pairs
+        Reading(datetime.fromisoformat(dt), value, None) for dt, value in pairs
     )
 
 
-def test_external_statistic_id_format() -> None:
-    """The ID must contain a colon and start with the integration domain.
-    HA's recorder rejects external statistic_ids that do not follow that
-    pattern."""
-    sid = external_statistic_id("863224497404", "129343890428")
-    assert sid == "eac_cyprus:863224497404_129343890428"
-    assert ":" in sid
+def test_first_interval_and_decimal_precision():
+    points = {
+        "2026-05-01T00:30:00+00:00": "0.101",
+        "2026-05-01T01:00:00+00:00": "0.202",
+    }
+    rows = build_statistics(points, True)
+    assert [r["sum"] for r in rows] == [0, 0.303]
+    assert rows[1]["start"] == datetime(2026, 5, 1, tzinfo=UTC)
 
 
-async def test_no_op_when_no_cumulative_readings(hass: HomeAssistant) -> None:
-    """Interval channels (reading=None) produce no statistics."""
-    interval_only = _readings(
-        ("2026-05-01T01:00:00", None, 0.5),
-        ("2026-05-01T01:30:00", None, 0.6),
+@pytest.mark.parametrize("month,day,hours", [(3, 29, 23), (10, 25, 25), (5, 1, 24)])
+def test_day_totals_across_dst(month, day, hours):
+    tz = ZoneInfo("Asia/Nicosia")
+    start = datetime(2026, month, day, tzinfo=tz).astimezone(UTC)
+    end = (datetime(2026, month, day, tzinfo=tz) + timedelta(days=1)).astimezone(UTC)
+    points = {}
+    dt = start + timedelta(minutes=30)
+    while dt <= end:
+        points[dt.isoformat()] = "0.123"
+        dt += timedelta(minutes=30)
+    rows = build_statistics(points, True)
+    assert len(rows) == hours + 1
+    assert Decimal(str(rows[-1]["sum"])) == Decimal("0.123") * hours * 2
+    assert rows[-1]["start"] == end - timedelta(hours=1)
+
+
+def test_month_totals_and_missing_half_hour():
+    start = datetime(2026, 10, 1, tzinfo=ZoneInfo("Asia/Nicosia")).astimezone(UTC)
+    end = datetime(2026, 11, 1, tzinfo=ZoneInfo("Asia/Nicosia")).astimezone(UTC)
+    dt = start + timedelta(minutes=30)
+    points = {}
+    while dt <= end:
+        points[dt.isoformat()] = "0.001"
+        dt += timedelta(minutes=30)
+    rows = build_statistics(points, True)
+    assert rows[-1]["sum"] == 1.490  # 31 days plus one autumn hour
+    del points[(start + timedelta(minutes=30)).isoformat()]
+    assert build_statistics(points, True)[-1]["sum"] == 1.489
+
+
+def test_sparse_register_initial_value_is_only_a_baseline():
+    rows = build_statistics(
+        {
+            "2025-01-01T00:00:00+00:00": "12000",
+            "2025-03-01T00:00:00+00:00": "12150",
+            "2025-05-01T00:00:00+00:00": "8",
+            "2025-07-01T00:00:00+00:00": "23",
+        },
+        False,
+    )
+    assert len(rows) == 4
+    assert [r["sum"] for r in rows] == [0, 150, 150, 165]
+
+
+def test_meter_swap_isolated_even_with_reused_channel_id():
+    assert interval_statistic_id("111", "old", "1") != interval_statistic_id(
+        "111", "new", "1"
+    )
+
+
+async def test_repeat_restart_correction_and_earlier_backfill(hass):
+    sid = "eac_cyprus:111_precise"
+    initial = readings(
+        ("2026-05-02T00:30:00+00:00", 0.1),
+        ("2026-05-02T01:00:00+00:00", 0.2),
+        ("2026-05-02T01:30:00+00:00", 0.3),
     )
     with patch(
         "custom_components.eac_cyprus.statistics.async_add_external_statistics"
-    ) as mock_add:
-        import_cumulative_history(
-            hass, "111", "mc-30min", "KWH-30MIN-LP-IMP", interval_only
+    ) as add:
+        ledger = EacStatistics(hass, "test")
+        await ledger.async_merge(sid, "Energy", initial, interval=True, full=True)
+        assert add.call_args.args[1]["mean_type"] == StatisticMeanType.NONE
+        assert add.call_args.args[2][-1]["sum"] == 0.6
+        add.reset_mock()
+        await ledger.async_merge(sid, "Energy", initial, interval=True)
+        add.assert_not_called()
+        restarted = EacStatistics(hass, "test")
+        await restarted.async_load()
+        assert add.call_args.args[2][-1]["sum"] == 0.6
+        await restarted.async_merge(
+            sid, "Energy", readings(("2026-05-02T00:30:00+00:00", 0.111)), interval=True
         )
-    mock_add.assert_not_called()
+        assert add.call_args.args[2][-1]["sum"] == 0.611
+        await restarted.async_merge(
+            sid, "Energy", readings(("2026-05-01T23:30:00+00:00", 1.001)), interval=True
+        )
+        assert add.call_args.args[2][-1]["sum"] == 1.612
+        # Corrected first hour's change stays precise after an earlier backfill.
+        assert add.call_args.args[2][-2]["sum"] == 1.312
 
 
-async def test_imports_cumulative_kwh_with_correct_metadata(
-    hass: HomeAssistant,
-) -> None:
-    """Verify the metadata and StatisticData rows we hand to the recorder."""
-    rdgs = _readings(
-        ("2026-05-01T00:00:00", 2900.0, 23.0),
-        ("2026-05-02T00:00:00", 2924.0, 24.0),
-        ("2026-05-03T00:00:00", 2950.0, 26.0),
+async def test_bad_interval_does_not_modify_ledger(hass):
+    ledger = EacStatistics(hass, "invalid")
+    with pytest.raises(ValueError):
+        await ledger.async_merge(
+            "eac_cyprus:invalid",
+            "Energy",
+            readings(("2026-05-01T00:30:00+00:00", -1)),
+            interval=True,
+        )
+    assert ledger.series == {}
+
+
+async def test_recorder_upserts_and_dashboard_daily_monthly_changes(
+    hass, recorder_mock
+):
+    """Exercise HA's real SQLite recorder and its Energy change queries."""
+    from homeassistant.components.recorder.statistics import statistics_during_period
+    from homeassistant.util import dt as dt_util
+
+    dt_util.set_default_time_zone(ZoneInfo("Asia/Nicosia"))
+    sid = "eac_cyprus:acceptance"
+    ledger = EacStatistics(hass, "recorder")
+    # One local calendar day spanning the autumn fallback (50 half-hours).
+    start = datetime(2026, 10, 25, tzinfo=ZoneInfo("Asia/Nicosia")).astimezone(UTC)
+    points = tuple(
+        Reading(start + timedelta(minutes=30 * (i + 1)), 0.123, None) for i in range(50)
     )
+    await ledger.async_merge(sid, "Energy", points, interval=True, full=True)
+    await hass.async_add_executor_job(recorder_mock.block_till_done)
 
+    async def query(period):
+        return await recorder_mock.async_add_executor_job(
+            statistics_during_period,
+            hass,
+            start,
+            start + timedelta(hours=25),
+            {sid},
+            period,
+            None,
+            {"sum", "change"},
+        )
+
+    assert (await query("day"))[sid][0]["change"] == pytest.approx(6.150, abs=0.000001)
+    assert (await query("month"))[sid][0]["change"] == pytest.approx(
+        6.150, abs=0.000001
+    )
+    before = await query("hour")
+    await ledger.async_merge(sid, "Energy", points, interval=True, full=True)
+    restarted = EacStatistics(hass, "recorder")
+    await restarted.async_load()
+    await hass.async_add_executor_job(recorder_mock.block_till_done)
+    assert await query("hour") == before
+    await restarted.async_merge(
+        sid, "Energy", (Reading(points[0].dt, 0.124, None),), interval=True
+    )
+    await hass.async_add_executor_job(recorder_mock.block_till_done)
+    assert (await query("day"))[sid][0]["change"] == pytest.approx(6.151, abs=0.000001)
+    assert len((await query("hour"))[sid]) == 25
+
+
+async def test_recorder_enqueue_failure_retries_unchanged_source(hass):
+    ledger = EacStatistics(hass, "retry")
+    args = (
+        "eac_cyprus:retry",
+        "Energy",
+        readings(("2026-05-01T00:30:00+00:00", 0.123)),
+    )
+    with (
+        patch(
+            "custom_components.eac_cyprus.statistics.async_add_external_statistics",
+            side_effect=RuntimeError("queue unavailable"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await ledger.async_merge(*args, interval=True)
     with patch(
         "custom_components.eac_cyprus.statistics.async_add_external_statistics"
-    ) as mock_add:
-        import_cumulative_history(
-            hass, "863224497404", "mc-total", "1281890 Energy total (24h)", rdgs
-        )
-
-    mock_add.assert_called_once()
-    _, metadata, stats = mock_add.call_args.args
-    assert metadata["statistic_id"] == "eac_cyprus:863224497404_mc-total"
-    assert metadata["source"] == DOMAIN
-    assert metadata["has_sum"] is True
-    assert metadata["has_mean"] is False
-    assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
-    # Display name is passed through verbatim (meter serial + channel label).
-    assert metadata["name"] == "1281890 Energy total (24h)"
-
-    assert len(stats) == 3
-    for s, expected_reading in zip(stats, [2900.0, 2924.0, 2950.0], strict=True):
-        assert s["start"].tzinfo is UTC
-        assert s["start"].minute == 0 and s["start"].second == 0
-        assert s["sum"] == expected_reading
-        # External statistics do not carry `state`; we only push `sum`.
-        assert "state" not in s
-
-
-async def test_coordinator_pushes_stats_for_cumulative_channel_only(
-    hass: HomeAssistant, mock_client
-) -> None:
-    """Integration check: cumulative channel triggers import, 30-min channel does not."""
-    from custom_components.eac_cyprus.coordinator import EacCoordinator
-
-    entry = _entry(hass)
-    coord = EacCoordinator(hass, mock_client, entry)
-    with patch(
-        "custom_components.eac_cyprus.coordinator.import_cumulative_history"
-    ) as mock_import:
-        await coord._async_update_data()
-
-    called_channels = [
-        c.kwargs.get("channel_id") or c.args[2] for c in mock_import.call_args_list
-    ]
-    assert "mc-total-24h" in called_channels
-    assert "mc-30min-imp" not in called_channels
+    ) as add:
+        await ledger.async_merge(*args, interval=True)
+        assert add.call_args.args[2][-1]["sum"] == 0.123

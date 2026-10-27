@@ -10,6 +10,7 @@ service point itself acting as the parent device. Each meter exposes:
 The canonical history lives in external statistics (see statistics.py); the
 entities here are the "what does HA know now" half of the picture.
 """
+
 from __future__ import annotations
 
 import logging
@@ -46,7 +47,9 @@ _LOGGER = logging.getLogger(__name__)
 _INTERVAL_TO_POWER_FACTOR: dict[str, float] = {"30MIN": 2.0}
 
 
-def _value_description(uom: str, ch_type: str, interval: bool) -> SensorEntityDescription:
+def _value_description(
+    uom: str, ch_type: str, interval: bool
+) -> SensorEntityDescription:
     """Describe the 'last value' glance sensor for one channel.
 
     Cumulative kWh channels are a plain latest-value display with NO state_class
@@ -72,7 +75,7 @@ def _value_description(uom: str, ch_type: str, interval: bool) -> SensorEntityDe
             name=channel_label(ch_type),
             native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
             device_class=SensorDeviceClass.ENERGY,
-            suggested_display_precision=0,
+            suggested_display_precision=2,
         )
     if uom_upper == "KVAH":
         return SensorEntityDescription(
@@ -90,7 +93,7 @@ def _value_description(uom: str, ch_type: str, interval: bool) -> SensorEntityDe
         )
     return SensorEntityDescription(
         key=key,
-        name=_label(ch_type),
+        name=channel_label(ch_type),
         native_unit_of_measurement=uom,
         entity_registry_enabled_default=False,
     )
@@ -151,13 +154,21 @@ async def async_setup_entry(
                     if key in known_channels:
                         continue
                     known_channels.add(key)
-                    new.append(EacChannelSensor(coordinator, sp.id, ms.key, ch_state.channel.id))
+                    new.append(
+                        EacChannelSensor(
+                            coordinator, sp.id, ms.key, ch_state.channel.id
+                        )
+                    )
                 # Per-meter diagnostics, only for the active meter.
                 if ms.active and ms.key not in known_meters:
                     known_meters.add(ms.key)
                     new.extend(
                         cls(coordinator, sp.id, ms.key)
-                        for cls in (EacMeasuredAtSensor, EacReceivedAtSensor, EacLagSensor)
+                        for cls in (
+                            EacMeasuredAtSensor,
+                            EacReceivedAtSensor,
+                            EacLagSensor,
+                        )
                     )
         if new:
             async_add_entities(new)
