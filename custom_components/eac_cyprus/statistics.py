@@ -112,6 +112,20 @@ class EacStatistics:
         self.loaded = False
         self._pending: set[str] = set()
 
+    def latest_reading(self, sid: str) -> Reading | None:
+        """Keep the latest known sensor value when a short poll returns no rows."""
+        data = self.series.get(sid, {})
+        points = data.get("points", {})
+        if not points:
+            return None
+        key = max(points, key=datetime.fromisoformat)
+        value = float(points[key])
+        return Reading(
+            dt=datetime.fromisoformat(key),
+            value=value,
+            reading=None if data["interval"] else value,
+        )
+
     async def async_load(self) -> None:
         if self.loaded:
             return
@@ -140,6 +154,7 @@ class EacStatistics:
         position: str = "end",
         full: bool = False,
         fetched_through: datetime | None = None,
+        progress: dict | None = None,
     ) -> None:
         await self.async_load()
         old = self.series.get(sid, {})
@@ -176,6 +191,10 @@ class EacStatistics:
             data["full_checked"] = datetime.now(UTC).isoformat()
         if fetched_through:
             data["fetched_through"] = fetched_through.isoformat()
+        if progress is not None:
+            data["import_progress"] = progress
+        else:
+            data.pop("import_progress", None)
         if changed or full:
             self._pending.add(sid)
         self.series[sid] = data

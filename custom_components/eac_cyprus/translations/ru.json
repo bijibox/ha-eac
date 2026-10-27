@@ -24,13 +24,88 @@
     "step": {
       "init": {
         "title": "Настройки EAC",
-        "description": "Имейте в виду: портал обновляет данные раз в сутки, а 30-минутный профиль приходит с задержкой в часы. Опрос чаще 6 часов не сделает график Energy Dashboard плотнее — для этого нужен импорт statistics (в плане).",
+        "description": "Частота опроса независима от глубины истории. С догрузкой запрашиваются минимум 2 суток. Каждые полные сутки отставания добавляют сутки: пропуск 1 суток — окно 3 суток, пропуск 2 — окно 4. Учитывается более ранняя из дат последней загрузки и фактического показания. Последнее показание включается в запрос. Начальная и еженедельная полная загрузка сохраняют прогресс по частям за 7 дней.",
         "data": {
           "scan_interval_minutes": "Интервал опроса",
-          "history_days": "Окно истории (за сколько дней тянуть на каждом опросе)",
+          "fetch_from_last": "Догружать с последнего полученного показания (включительно)",
+          "history_days": "Окно истории (дней; для энергии — если догрузка выключена)",
           "stale_threshold_days": "Порог устаревания данных (дней без свежего показания до срабатывания диагностики)"
         }
       }
+    }
+  },
+  "entity": {
+    "button": {
+      "refresh_data": {
+        "name": "Refresh data from EAC"
+      }
+    },
+    "binary_sensor": {
+      "data_stale": {
+        "name": "Data stale"
+      }
+    },
+    "sensor": {
+      "s_kwh_24h": {
+        "name": "Energy total (24h)"
+      },
+      "s_kwh_normal": {
+        "name": "Energy peak tariff"
+      },
+      "s_kwh_offpeak": {
+        "name": "Energy off-peak tariff"
+      },
+      "s_kwh_exp": {
+        "name": "Energy exported"
+      },
+      "kwh_30min_lp_imp": {
+        "name": "Power import (30-min average)"
+      },
+      "kwh_30min_lp_exp": {
+        "name": "Power export (30-min average)"
+      },
+      "s_kvah_24h": {
+        "name": "Apparent energy"
+      },
+      "s_kvah_24h_exp": {
+        "name": "Apparent energy exported"
+      },
+      "s_kvrh_24h": {
+        "name": "Reactive energy"
+      },
+      "s_kvrh_24h_exp": {
+        "name": "Reactive energy exported"
+      },
+      "s_kwh": {
+        "name": "Energy total"
+      },
+      "measured_at": {
+        "name": "Data measured at"
+      },
+      "received_at": {
+        "name": "Data received at"
+      },
+      "data_lag": {
+        "name": "Data lag"
+      }
+    }
+  },
+  "selector": {
+    "polling_interval": {
+      "options": {
+        "30": "30 minutes",
+        "60": "1 hour",
+        "180": "3 hours",
+        "360": "6 hours",
+        "720": "12 hours",
+        "1440": "24 hours"
+      }
+    }
+  },
+  "services": {
+    "import_full_history": {
+      "name": "Import full history",
+      "description": "Load all available energy history from EAC for active and retired meters. Save progress in weekly chunks and resume after interruptions. Repeated imports replace corrected readings without double counting."
     }
   }
 }

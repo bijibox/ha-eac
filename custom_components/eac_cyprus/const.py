@@ -11,17 +11,19 @@ CONF_BASE_URL = "base_url"
 # Runtime-tunable options (config entry .options dict).
 CONF_SCAN_INTERVAL_MINUTES = "scan_interval_minutes"
 CONF_HISTORY_DAYS = "history_days"
+CONF_FETCH_FROM_LAST = "fetch_from_last"
 CONF_STALE_THRESHOLD_DAYS = "stale_threshold_days"
 
 DEFAULT_BASE_URL = "https://meterreading-dso.eac.com.cy"
 
-# 6h is plenty: the EAC portal updates daily and 30-min profile data lags by
-# hours, so polling more often gains nothing in practice.
+# Keep the existing default cadence; users can select 30 minutes independently
+# of the history window. Portal publication can lag behind any polling cadence.
 DEFAULT_SCAN_INTERVAL_MINUTES = 360
 
 # Pulling a few days of history on every refresh lets us recover gracefully
 # from missed reports (e.g. the integration was down or network blipped).
-DEFAULT_HISTORY_DAYS = 14
+DEFAULT_HISTORY_DAYS = 2
+DEFAULT_FETCH_FROM_LAST = False
 
 # The portal publishes with a 2-3 day lag, so "no fresh data" only becomes
 # suspicious a bit beyond that. Marks binary_sensor.*_data_stale on.

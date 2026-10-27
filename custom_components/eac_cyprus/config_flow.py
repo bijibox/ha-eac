@@ -21,11 +21,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     CONF_BASE_URL,
     CONF_EMAIL,
+    CONF_FETCH_FROM_LAST,
     CONF_HISTORY_DAYS,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL_MINUTES,
     CONF_STALE_THRESHOLD_DAYS,
     DEFAULT_BASE_URL,
+    DEFAULT_FETCH_FROM_LAST,
     DEFAULT_HISTORY_DAYS,
     DEFAULT_SCAN_INTERVAL_MINUTES,
     DEFAULT_STALE_THRESHOLD_DAYS,
@@ -103,17 +105,6 @@ class EacConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
-# Human labels for the polling-interval dropdown.
-_INTERVAL_LABELS: dict[int, str] = {
-    30: "30 minutes",
-    60: "1 hour",
-    180: "3 hours",
-    360: "6 hours (recommended)",
-    720: "12 hours",
-    1440: "24 hours",
-}
-
-
 class EacOptionsFlow(OptionsFlow):
     """Editable runtime settings: polling cadence and history window."""
 
@@ -142,15 +133,15 @@ class EacOptionsFlow(OptionsFlow):
                     CONF_SCAN_INTERVAL_MINUTES, default=str(current_interval)
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
-                        options=[
-                            selector.SelectOptionDict(
-                                value=str(m), label=_INTERVAL_LABELS[m]
-                            )
-                            for m in SCAN_INTERVAL_CHOICES
-                        ],
+                        options=[str(m) for m in SCAN_INTERVAL_CHOICES],
+                        translation_key="polling_interval",
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     ),
                 ),
+                vol.Required(
+                    CONF_FETCH_FROM_LAST,
+                    default=current.get(CONF_FETCH_FROM_LAST, DEFAULT_FETCH_FROM_LAST),
+                ): selector.BooleanSelector(),
                 vol.Required(
                     CONF_HISTORY_DAYS, default=current_history
                 ): selector.NumberSelector(

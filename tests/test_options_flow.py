@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
+from eac_dso_portal import ChannelReadings, Reading
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.eac_cyprus.const import (
     CONF_EMAIL,
+    CONF_FETCH_FROM_LAST,
     CONF_HISTORY_DAYS,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL_MINUTES,
@@ -41,6 +44,8 @@ async def test_options_flow_defaults_on_first_open(
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "init"
+    defaults = {key.schema: key.default() for key in result["data_schema"].schema}
+    assert defaults[CONF_FETCH_FROM_LAST] is False
 
 
 async def test_options_flow_saves_and_applies(
@@ -61,6 +66,7 @@ async def test_options_flow_saves_and_applies(
         {
             CONF_SCAN_INTERVAL_MINUTES: "60",  # select selector returns strings
             CONF_HISTORY_DAYS: 7,
+            CONF_FETCH_FROM_LAST: True,
         },
     )
     await hass.async_block_till_done()
@@ -68,6 +74,7 @@ async def test_options_flow_saves_and_applies(
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_SCAN_INTERVAL_MINUTES] == 60  # coerced to int
     assert entry.options[CONF_HISTORY_DAYS] == 7
+    assert entry.options[CONF_FETCH_FROM_LAST] is True
     # The update listener picked up the new interval without reloading.
     assert coordinator.update_interval == timedelta(minutes=60)
 
@@ -78,7 +85,11 @@ async def test_options_flow_form_prefills_current_values(
     """The form should show the currently-saved options as defaults, not factory."""
     entry = _entry(
         hass,
-        options={CONF_SCAN_INTERVAL_MINUTES: 180, CONF_HISTORY_DAYS: 30},
+        options={
+            CONF_SCAN_INTERVAL_MINUTES: 180,
+            CONF_HISTORY_DAYS: 30,
+            CONF_FETCH_FROM_LAST: True,
+        },
     )
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -89,6 +100,7 @@ async def test_options_flow_form_prefills_current_values(
     defaults = {key.schema: key.default() for key in schema.schema}
     assert defaults[CONF_SCAN_INTERVAL_MINUTES] == "180"
     assert defaults[CONF_HISTORY_DAYS] == 30
+    assert defaults[CONF_FETCH_FROM_LAST] is True
 
 
 async def test_coordinator_reads_history_days_from_options(
@@ -124,3 +136,69 @@ async def test_coordinator_falls_back_to_defaults_without_options(
     args = mock_client.get_readings.await_args_list[0]
     _sp_id, start, end = args.args[:3]
     assert (end - start) == timedelta(days=DEFAULT_HISTORY_DAYS)
+
+
+async def test_incremental_poll_corrects_last_reading_and_resumes_after_restart(
+    hass, mock_client, fake_active_meter, fake_meter_30min_channel, freezer
+):
+    """Use saved observations even when the last request covered a later date."""
+    from custom_components.eac_cyprus.coordinator import EacCoordinator
+    from custom_components.eac_cyprus.history import statistic_id
+    from custom_components.eac_cyprus.statistics import build_statistics
+
+    freezer.move_to("2026-05-08T12:00:00+00:00")
+
+    entry = _entry(
+        hass,
+        options={
+            CONF_FETCH_FROM_LAST: True,
+            CONF_SCAN_INTERVAL_MINUTES: 30,
+            CONF_HISTORY_DAYS: 3,
+        },
+    )
+    meter = replace(fake_active_meter, channels=(fake_meter_30min_channel,))
+    mock_client.get_meter_configs.return_value = [meter]
+    coord = EacCoordinator(hass, mock_client, entry)
+    assert coord.update_interval == timedelta(minutes=30)
+    await coord._async_update_data()
+
+    last = datetime(2026, 5, 8, 11, tzinfo=UTC)  # fixture's 14:00 Cyprus
+    following = last + timedelta(minutes=30)
+    mock_client.get_readings.side_effect = None
+    mock_client.get_readings.return_value = [
+        ChannelReadings(
+            channel_id=fake_meter_30min_channel.id,
+            readings=(
+                Reading(dt=last, value=0.321, reading=None),
+                Reading(dt=following, value=0.456, reading=None),
+            ),
+        )
+    ]
+    mock_client.get_readings.reset_mock()
+    await coord._async_update_data()
+    assert mock_client.get_readings.await_args.args[1] == datetime(
+        2026, 5, 6, 12, tzinfo=UTC
+    )
+    sid = statistic_id("111111111111", meter, fake_meter_30min_channel)
+    points = coord.statistics.series[sid]["points"]
+    assert len(points) == 2
+    assert build_statistics(points, interval=True)[-1]["sum"] == 0.777
+
+    # Empty responses and restart must not move the cursor to request end.
+    restarted = EacCoordinator(hass, mock_client, entry)
+    mock_client.get_readings.return_value = []
+    for _ in range(2):
+        await restarted._async_update_data()
+        assert mock_client.get_readings.await_args.args[1] == datetime(
+            2026, 5, 6, 12, tzinfo=UTC
+        )
+    assert restarted.statistics.series[sid]["points"] == points
+
+    # Disabling the checkbox takes effect without changing the cadence.
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, CONF_FETCH_FROM_LAST: False}
+    )
+    await restarted._async_update_data()
+    _, start, end = mock_client.get_readings.await_args.args
+    assert end - start == timedelta(days=3)
+    assert restarted.update_interval == timedelta(minutes=30)

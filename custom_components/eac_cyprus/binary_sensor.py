@@ -53,7 +53,7 @@ class EacStaleSensor(_MeterEntity, BinarySensorEntity):
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
-    _attr_name = "Data stale"
+    _attr_translation_key = "data_stale"
 
     def __init__(
         self,

@@ -63,6 +63,7 @@ def _value_description(
     if uom_upper == "KWH" and interval:
         return SensorEntityDescription(
             key=key,
+            translation_key=key,
             name=channel_label(ch_type),
             native_unit_of_measurement=UnitOfPower.KILO_WATT,
             device_class=SensorDeviceClass.POWER,
@@ -72,6 +73,7 @@ def _value_description(
     if uom_upper == "KWH":
         return SensorEntityDescription(
             key=key,
+            translation_key=key,
             name=channel_label(ch_type),
             native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
             device_class=SensorDeviceClass.ENERGY,
@@ -80,6 +82,7 @@ def _value_description(
     if uom_upper == "KVAH":
         return SensorEntityDescription(
             key=key,
+            translation_key=key,
             name=channel_label(ch_type),
             native_unit_of_measurement=UnitOfApparentPower.VOLT_AMPERE,
             entity_registry_enabled_default=False,
@@ -87,6 +90,7 @@ def _value_description(
     if uom_upper in ("KVARH", "KVRH"):
         return SensorEntityDescription(
             key=key,
+            translation_key=key,
             name=channel_label(ch_type),
             native_unit_of_measurement=UnitOfReactivePower.VOLT_AMPERE_REACTIVE,
             entity_registry_enabled_default=False,
@@ -252,7 +256,7 @@ class EacMeasuredAtSensor(_MeterEntity, SensorEntity):
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = SensorDeviceClass.TIMESTAMP
-    _attr_name = "Data measured at"
+    _attr_translation_key = "measured_at"
 
     def __init__(self, coordinator: EacCoordinator, sp_id: str, meter_key: str) -> None:
         super().__init__(coordinator, sp_id, meter_key)
@@ -270,7 +274,7 @@ class EacReceivedAtSensor(_MeterEntity, SensorEntity):
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = SensorDeviceClass.TIMESTAMP
-    _attr_name = "Data received at"
+    _attr_translation_key = "received_at"
 
     def __init__(self, coordinator: EacCoordinator, sp_id: str, meter_key: str) -> None:
         super().__init__(coordinator, sp_id, meter_key)
@@ -290,7 +294,7 @@ class EacLagSensor(_MeterEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_native_unit_of_measurement = UnitOfTime.HOURS
     _attr_suggested_display_precision = 1
-    _attr_name = "Data lag"
+    _attr_translation_key = "data_lag"
 
     def __init__(self, coordinator: EacCoordinator, sp_id: str, meter_key: str) -> None:
         super().__init__(coordinator, sp_id, meter_key)

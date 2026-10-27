@@ -30,17 +30,19 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    CONF_FETCH_FROM_LAST,
     CONF_HISTORY_DAYS,
     CONF_SCAN_INTERVAL_MINUTES,
+    DEFAULT_FETCH_FROM_LAST,
     DEFAULT_HISTORY_DAYS,
     DEFAULT_SCAN_INTERVAL_MINUTES,
     DOMAIN,
 )
 from .energy import async_migrate_energy
 from .history import (
+    async_fetch_energy_history,
     async_import_full_history,
     history_window,
-    import_channel,
     is_energy,
     statistic_id,
 )
@@ -214,35 +216,48 @@ class EacCoordinator(DataUpdateCoordinator[EacData]):
                     int(
                         self._entry.options.get(CONF_HISTORY_DAYS, DEFAULT_HISTORY_DAYS)
                     ),
+                    from_last=self._entry.options.get(
+                        CONF_FETCH_FROM_LAST, DEFAULT_FETCH_FROM_LAST
+                    ),
                 )
             try:
-                per_channel = await self._client.get_readings(
-                    sp.id, channel_start, channel_end, mc_id=ch.id
-                )
+                if is_energy(ch):
+                    readings = await async_fetch_energy_history(
+                        self._client,
+                        self.statistics,
+                        sp.id,
+                        cfg,
+                        ch,
+                        channel_start,
+                        channel_end,
+                        full=full,
+                    )
+                else:
+                    per_channel = await self._client.get_readings(
+                        sp.id, channel_start, channel_end, mc_id=ch.id
+                    )
+                    readings = tuple(
+                        r
+                        for cr in per_channel
+                        if cr.channel_id == ch.id
+                        for r in cr.readings
+                    )
             except EacApiError as err:
                 _LOGGER.warning(
                     "Readings failed for sp=%s mc=%s: %s", sp.id, ch.id, err
                 )
                 continue
-            matching = next((cr for cr in per_channel if cr.channel_id == ch.id), None)
-            if matching is None or not matching.readings:
+            latest = (
+                self.statistics.latest_reading(statistic_id(sp.id, cfg, ch))
+                if is_energy(ch)
+                else max(readings, key=lambda r: as_utc(r.dt), default=None)
+            )
+            if latest is None:
                 continue
-            latest = max(matching.readings, key=lambda r: r.dt)
             channels[ch.id] = ChannelState(channel=ch, latest=latest)
             dt = _as_utc(latest.dt)
             if dt is not None and (measured_at is None or dt > measured_at):
                 measured_at = dt
-
-            if is_energy(ch):
-                await import_channel(
-                    self.statistics,
-                    sp.id,
-                    cfg,
-                    ch,
-                    matching.readings,
-                    full=full,
-                    end=channel_end,
-                )
 
         return MeterState(
             service_point=sp,

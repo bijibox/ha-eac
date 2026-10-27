@@ -41,13 +41,27 @@ The first successful poll backfills each energy channel from its meter installat
 
 It returns a per-channel summary and posts a notification when done. Both import/export load profiles and sparse cumulative channels are included. Failed requests are reported as failures. Polling and manual imports share a lock; repeats and restarts are idempotent.
 
+Energy history is requested sequentially in chunks of up to **7 local days** per channel. The library pads requests with whole Cyprus days to preserve boundary records and repeated DST timestamps; these extra records are clipped to the requested range. Shared chunk boundaries are included and deduplicated by UTC timestamp.
+
+Every completed chunk saves its readings and a restart cursor before the next request. If a request fails or Home Assistant restarts, the next poll or full import resumes at that boundary. Even empty chunks save progress. Only the final successful chunk marks the channel's full reconciliation complete. Saved history remains available throughout.
+
 ## Configuration
 
 Settings → Devices & Services → the EAC tile → three-dot menu → **Configure**:
 
-- **Polling interval** — 30 min … 24 h (default 6 h). The portal updates daily, so more often rarely helps.
-- **History window (days)** — how far back each poll fetches (default 14). This is the correction window. Long outages are caught up automatically; a complete reconciliation runs every seven days to pick up older corrections.
+- **Polling interval** — 30 min … 24 h (default 6 h). Choose **30 minutes** independently of the history settings. Portal data can arrive late regardless of the polling frequency.
+- **Catch up from the last received reading (inclusive)** — optional, off by default. Energy queries cover at least **2 days**, adding a day for every complete day of lag. A 30-minute gap means 2 days; a 1-day gap means 3; a 2-day gap means 4. Lag is measured from the older of the last fetched timestamp and the latest actual saved reading, so successful responses with delayed data do not skip the missing tail. The window includes the last reading and an overlap for corrections. Queries end at now, or at the meter's removal date. Weekly full reconciliation still revisits older gaps and corrections; it takes precedence when due.
+- **History window (days)** — how far back each poll fetches when catch-up is off (default **2**; existing explicitly saved settings are retained). Long outages are caught up automatically; a complete reconciliation runs every seven days to pick up older corrections.
+  When fetching from the last reading is enabled, this window only applies to channels without energy history.
 - **Data-stale threshold (days)** — how long without a fresh reading before `Data stale` flags (default 4, i.e. a bit beyond the normal 2–3 day lag).
+
+## Refresh button and languages
+
+Each active service-point device has a **Refresh data from EAC** button. It requests the normal account-wide poll using the current history settings, including any due reconciliation. It shares the import lock and Home Assistant's refresh debounce, and remains usable after a failed poll.
+
+To place it beside your electricity charts, add a **Button** card to a custom dashboard and select this entity. Home Assistant's built-in Energy dashboard does not provide a slot for arbitrary buttons; its [energy cards](https://www.home-assistant.io/dashboards/energy/) can also be placed on a custom dashboard with the refresh button.
+
+English is the default language. Greek translations cover setup, options, polling choices, entity names and the full-history action. In Greek the button is **Ενημέρωση δεδομένων από την ΑΗΚ**. External statistic IDs and imported series names remain stable when the interface language changes.
 
 ## Install
 

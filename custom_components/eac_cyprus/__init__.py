@@ -22,7 +22,7 @@ from .coordinator import EacCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
 
 SERVICE_IMPORT_HISTORY = "import_full_history"
 _OFFERED_FLAG = "precise_history_import_offered"
